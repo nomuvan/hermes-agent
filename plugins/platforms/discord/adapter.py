@@ -601,6 +601,7 @@ def _clean_discord_id(entry: str) -> str:
 _GATE_ENV_KEYS = (
     "DISCORD_ALLOWED_USERS", "DISCORD_ALLOWED_ROLES", "DISCORD_ALLOWED_CHANNELS",
     "DISCORD_IGNORED_CHANNELS", "DISCORD_NO_THREAD_CHANNELS", "DISCORD_FREE_RESPONSE_CHANNELS",
+    "DISCORD_FREE_RESPONSE_CHANNEL_PREFIXES",
     "DISCORD_MISSED_MESSAGE_BACKFILL_CHANNELS", "DISCORD_ALLOW_ALL_USERS", "DISCORD_ALLOW_BOTS",
     "GATEWAY_ALLOW_ALL_USERS", "GATEWAY_ALLOWED_USERS",
 )
@@ -1736,9 +1737,8 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
                     parent_id = None
                     if hasattr(message.channel, "parent_id") and message.channel.parent_id:
                         parent_id = str(message.channel.parent_id)
-                    free_channels = self._discord_free_response_channels()
                     channel_keys = self._discord_channel_keys(message, parent_id)
-                    if "*" not in free_channels and not (channel_keys & free_channels):
+                    if not self._discord_channel_is_free_response(channel_keys):
                         # Every other silent return in this function is at least guessable from
                         # the outside; this one is not, and an operator seeing no log line cannot
                         # tell it apart from the gateway never receiving the event.
@@ -2563,11 +2563,9 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
         if not isinstance(message.channel, discord.DMChannel):
             parent_id = self._get_parent_channel_id(message.channel)
             channel_keys = self._discord_channel_keys(message, parent_id)
-            free_channels = self._discord_free_response_channels()
             if (
                 self._discord_require_mention()
-                and "*" not in free_channels
-                and not (channel_keys & free_channels)
+                and not self._discord_channel_is_free_response(channel_keys)
                 and not self._in_bot_thread(message)
                 and not self._self_is_explicitly_mentioned(message)
             ):
@@ -5120,6 +5118,26 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
             raw = self._gate_env("DISCORD_FREE_RESPONSE_CHANNELS")
         return self._gate_csv_set(raw)
 
+    def _discord_free_response_channel_prefixes(self) -> set[str]:
+        """Channel-name prefixes needing no mention (for example ``hermes-``)."""
+        raw = self.config.extra.get("free_response_channel_prefixes")
+        if raw is None:
+            raw = self._gate_env("DISCORD_FREE_RESPONSE_CHANNEL_PREFIXES")
+        return self._gate_csv_set(raw)
+
+    def _discord_channel_is_free_response(self, channel_keys: set[str]) -> bool:
+        """Return whether exact channel keys or a configured name prefix bypass mentions."""
+        free_channels = self._discord_free_response_channels()
+        if "*" in free_channels or bool(channel_keys & free_channels):
+            return True
+        prefixes = self._discord_free_response_channel_prefixes()
+        return any(
+            key.lstrip("#").startswith(prefix)
+            for key in channel_keys
+            for prefix in prefixes
+            if prefix
+        )
+
     def _raw_mentioned_user_ids(self, message: Any) -> set:
         """Extract user-mention IDs (``<@ID>`` and legacy ``<@!ID>``) from raw content,
         since ``message.mentions`` isn't always populated (mobile/edited/relayed)."""
@@ -6138,15 +6156,13 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
             if "*" in ignored_channels or (channel_keys & ignored_channels):
                 logger.debug("[%s] Ignoring message in ignored channel: %s", self.name, channel_keys)
                 return False
-            free_channels = self._discord_free_response_channels()
             require_mention = self._discord_require_mention()
             # Voice-linked text channel is free-response while voice is active (exact channel only).
             voice_linked_ids = {str(ch_id) for ch_id in self._voice_text_channels.values()}
             current_channel_id = str(message.channel.id)
             is_voice_linked_channel = current_channel_id in voice_linked_ids
             is_free_channel = (
-                "*" in free_channels
-                or bool(channel_keys & free_channels)
+                self._discord_channel_is_free_response(channel_keys)
                 or is_voice_linked_channel
             )
             in_bot_thread = self._in_bot_thread(message)
@@ -7321,6 +7337,7 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
         seeded_extra["approval_mentions"] = approval_mentions_cfg
         _env_default("DISCORD_APPROVAL_MENTIONS", str(approval_mentions_cfg).lower())
     _gate("free_response_channels", "DISCORD_FREE_RESPONSE_CHANNELS", from_platform_extra=False)
+    _gate("free_response_channel_prefixes", "DISCORD_FREE_RESPONSE_CHANNEL_PREFIXES", from_platform_extra=False)
     for key, env_key in (
         ("auto_thread", "DISCORD_AUTO_THREAD"),
         ("free_response_auto_thread", "DISCORD_FREE_RESPONSE_AUTO_THREAD"),

@@ -738,7 +738,8 @@ def launchd_start():
         _gw()._prepare_service_launcher()
         plist_path.write_text(new_plist, encoding="utf-8")
         if _launchd_bootstrap_and_kickstart(plist_path, label):
-            _launchd_ok("✓ Service started")
+            if _launchd_confirm_started_or_fallback(label):
+                _launchd_ok("✓ Service started")
         return
 
     _gw().refresh_launchd_plist_if_needed()
@@ -751,7 +752,8 @@ def launchd_start():
         print("↻ launchd job was unloaded; reloading service definition")
         if not _launchd_bootstrap_and_kickstart(plist_path, label):
             return
-    _launchd_ok("✓ Service started")
+    if _launchd_confirm_started_or_fallback(label):
+        _launchd_ok("✓ Service started")
 
 
 def _launchctl_kickstart_current(label: str) -> None:
@@ -767,6 +769,24 @@ def _launchd_bootstrap_and_kickstart(plist_path: Path, label: str) -> bool:
         _gw()._launchd_degrade_or_raise(e, "launchctl")
         return False
     return True
+
+
+def _launchd_confirm_started_or_fallback(label: str, *, timeout: float = 5.0) -> bool:
+    """Verify kickstart produced a process, otherwise use the detached fallback.
+
+    ``launchctl kickstart`` can exit zero even when launchd immediately fails to
+    spawn the plist executable. Without this check the CLI reports success while
+    the gateway remains stopped forever.
+    """
+    domain = _gw()._launchd_domain()
+    if _gw()._wait_for_launchd_service_pid(label, None, timeout=timeout, domain=domain):
+        return True
+    subprocess.run(
+        ["launchctl", "bootout", f"{domain}/{label}"],
+        check=False, timeout=90, **_gw()._CAPTURE_TEXT,
+    )
+    _gw()._launchd_fallback_to_detached("launchd registered the job but could not spawn it")
+    return False
 
 
 def _launchd_ok(message: str) -> None:
